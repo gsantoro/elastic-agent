@@ -1,0 +1,14 @@
+{
+    "name": "Launch elastic-agent",
+    "type": "go",
+    "request": "launch",
+    "mode": "debug",
+    "cwd": "${workspaceFolder}",
+    "program": "${workspaceFolder}/main.go",
+    "args": [
+        "--path.home",
+        "${workspaceFolder}/dev-tools/telepresence/managed/home",
+        "-e"
+    ],
+    "envFile": "${workspaceFolder}/dev-tools/telepresence/managed/.env"
+}

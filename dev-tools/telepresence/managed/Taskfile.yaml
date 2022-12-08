@@ -1,0 +1,38 @@
+# https://taskfile.dev
+
+version: '3'
+
+dotenv: [".env"]
+
+vars:
+  WORKSPACE: /Users/gsantoro/workspace
+  # VERSION: "8.7.0-SNAPSHOT-linux-arm64"
+  VERSION: "8.7.0-SNAPSHOT-darwin-aarch64"
+  ELASTIC_AGENT_WORKSPACE: "{{.WORKSPACE}}/elastic-agent/build/distributions/elastic-agent-{{.VERSION}}/"
+
+tasks:
+  default:
+    cmds:
+      - task: token-create
+      - task: ca-crt-create
+
+
+  token-create:
+    cmds:
+      - kubectl apply -f service-account.yml
+      - kubectl -n kube-system create token metricbeat > secrets/service-account-token.txt
+
+  ca-crt-create:
+    cmds:
+      - kubectl -n kube-system get cm kube-root-ca.crt -o json | jq -r '.data."ca.crt"' > secrets/ca.crt
+
+
+  kibana:
+    cmds:
+      - curl -k https://elastic:changeme@localhost:5601/api/features | jq .
+
+  enroll:
+    dir: "{{.ELASTIC_AGENT_WORKSPACE}}"
+    cmds:
+      - ./elastic-agent enroll --url=$FLEET_URL -t $FLEET_ENROLLMENT_TOKEN --insecure
+      # - ./elastic-agent enroll --help

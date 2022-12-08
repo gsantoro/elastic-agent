@@ -1,1 +1,6 @@
 /build
+
+telepresence/**/secrets
+telepresence/**/.env
+telepresence/**/home/data
+telepresence/**/home/logs
