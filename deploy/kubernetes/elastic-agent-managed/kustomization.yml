@@ -7,3 +7,9 @@ resources:
   - elastic-agent-managed-role.yaml
   - elastic-agent-managed-role-binding.yaml
   - elastic-agent-managed-daemonset.yaml
+
+configMapGenerator:
+  - name: fleet-config-map
+    namespace: kube-system
+    envs:
+    - .env
