@@ -1,0 +1,27 @@
+# https://taskfile.dev
+
+version: '3'
+
+dotenv: [".env"]
+
+tasks:
+  default:
+    cmds:
+      - task: elastic-agent-managed
+      # - task: elastic-agent-standalone
+
+  elastic-agent-managed:
+    cmds:
+      # # note: create original
+      # - kustomize build base/elastic-agent-managed > base/elastic-agent-managed-kubernetes.yaml
+
+      # note: create overlay
+      - kustomize build overlays/elastic-agent-managed > elastic-agent-managed-kubernetes.yaml
+
+  elastic-agent-standalone:
+    cmds:
+      # # note: create original
+      # - kustomize build base/elastic-agent-standalone > base/elastic-agent-standalone-kubernetes.yaml
+
+      # note: create overlay
+      - kustomize build overlays/elastic-agent-standalone > elastic-agent-standalone-kubernetes.yaml

@@ -1,0 +1,9 @@
+namespace: kube-system
+images:
+  - name: docker.elastic.co/beats/elastic-agent
+    newTag: "8.3.0"
+resources:
+  - elastic-agent-managed-service-account.yaml
+  - elastic-agent-managed-role.yaml
+  - elastic-agent-managed-role-binding.yaml
+  - elastic-agent-managed-daemonset.yaml

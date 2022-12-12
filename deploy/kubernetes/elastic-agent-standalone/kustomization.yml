@@ -1,0 +1,10 @@
+namespace: kube-system
+images:
+  - name: docker.elastic.co/beats/elastic-agent
+    newTag: "8.3.0"
+resources:
+  - elastic-agent-standalone-service-account.yaml
+  - elastic-agent-standalone-role.yaml
+  - elastic-agent-standalone-role-binding.yaml
+  - elastic-agent-standalone-daemonset-configmap.yaml
+  - elastic-agent-standalone-daemonset.yaml

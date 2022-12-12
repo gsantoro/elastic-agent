@@ -1,0 +1,7 @@
+resources:
+  - ../../base/elastic-agent-managed
+
+images:
+  - name: docker.elastic.co/beats/elastic-agent
+    newTag: "8.5.0"
+
