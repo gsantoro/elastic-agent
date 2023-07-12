@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	// "sync"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -753,6 +754,21 @@ func runAgent(env map[string]string) error {
 	return sh.Run("docker", dockerCmdArgs...)
 }
 
+func fetchBeat(ctx context.Context, platformPackages map[string]string, platform string, binary string, version string, archivePath string) {
+	reqPackage := platformPackages[platform]
+	targetPath := filepath.Join(archivePath, reqPackage)
+	os.MkdirAll(targetPath, 0755)
+	newVersion, packageName := getPackageName(binary, version, reqPackage)
+	err := fetchBinaryFromArtifactsApi(ctx, packageName, binary, newVersion, targetPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "object not found") {
+			fmt.Printf("Downloading %s: unsupported on %s, skipping\n", binary, platform)
+		} else {
+			panic(fmt.Sprintf("fetchBinaryFromArtifactsApi failed for %s on %s: %v", binary, platform, err))
+		}
+	}
+}
+
 func packageAgent(platforms []string, packagingFn func()) {
 	version, found := os.LookupEnv("BEAT_VERSION")
 	if !found {
@@ -794,35 +810,36 @@ func packageAgent(platforms []string, packagingFn func()) {
 
 		if devtools.ExternalBuild == true {
 			externalBinaries := []string{
-				"auditbeat", "filebeat", "heartbeat", "metricbeat", "osquerybeat", "packetbeat",
+				// "auditbeat",
+				"filebeat", "heartbeat", "metricbeat", "osquerybeat",
+				// "packetbeat",
 				// "cloudbeat", // TODO: add once working
-				"cloud-defend",
-				"elastic-agent-shipper",
-				"apm-server",
-				"endpoint-security",
-				"fleet-server",
-				"pf-elastic-collector",
-				"pf-elastic-symbolizer",
-				"pf-host-agent",
+				// "cloud-defend",
+				// "elastic-agent-shipper",
+				// "apm-server",
+				// "endpoint-security",
+				// "fleet-server",
+				// "pf-elastic-collector",
+				// "pf-elastic-symbolizer",
+				// "pf-host-agent",
 			}
+
+			// var fetchWg sync.WaitGroup
 
 			ctx := context.Background()
 			for _, binary := range externalBinaries {
 				for _, platform := range platforms {
-					reqPackage := platformPackages[platform]
-					targetPath := filepath.Join(archivePath, reqPackage)
-					os.MkdirAll(targetPath, 0755)
-					newVersion, packageName := getPackageName(binary, version, reqPackage)
-					err := fetchBinaryFromArtifactsApi(ctx, packageName, binary, newVersion, targetPath)
-					if err != nil {
-						if strings.Contains(err.Error(), "object not found") {
-							fmt.Printf("Downloading %s: unsupported on %s, skipping\n", binary, platform)
-						} else {
-							panic(fmt.Sprintf("fetchBinaryFromArtifactsApi failed for %s on %s: %v", binary, platform, err))
-						}
-					}
+					// fetchWg.Add(1)
+					// go func() {
+					// 	defer fetchWg.Done()
+					// 	fetchBeat(ctx, platformPackages, platform, binary, version, archivePath)
+					// }()
+					fetchBeat(ctx, platformPackages, platform, binary, version, archivePath)
 				}
 			}
+
+			// fetchWg.Wait()
+			// print("Done fetching beats")
 		} else {
 			packedBeats := []string{"filebeat", "heartbeat", "metricbeat", "osquerybeat"}
 			// build from local repo, will assume beats repo is located on the same root level
