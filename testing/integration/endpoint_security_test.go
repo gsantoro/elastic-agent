@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"text/template"
@@ -184,6 +185,7 @@ func testInstallAndCLIUninstallWithEndpointSecurity(t *testing.T, info *define.I
 	installOpts := atesting.InstallOpts{
 		NonInteractive: true,
 		Force:          true,
+		Unprivileged:   atesting.NewBool(false),
 	}
 
 	policy, err := tools.InstallAgentWithPolicy(ctx, t,
@@ -192,7 +194,10 @@ func testInstallAndCLIUninstallWithEndpointSecurity(t *testing.T, info *define.I
 
 	t.Cleanup(func() {
 		t.Log("Un-enrolling Elastic Agent...")
-		assert.NoError(t, fleettools.UnEnrollAgent(info.KibanaClient, policy.ID))
+		// Use a separate context as the one in the test body will have been cancelled at this point.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cleanupCancel()
+		assert.NoError(t, fleettools.UnEnrollAgent(cleanupCtx, info.KibanaClient, policy.ID))
 	})
 
 	t.Log("Installing Elastic Defend")
@@ -239,6 +244,7 @@ func testInstallAndUnenrollWithEndpointSecurity(t *testing.T, info *define.Info,
 	installOpts := atesting.InstallOpts{
 		NonInteractive: true,
 		Force:          true,
+		Unprivileged:   atesting.NewBool(false),
 	}
 
 	ctx, cn := testcontext.WithDeadline(t, context.Background(), time.Now().Add(10*time.Minute))
@@ -273,7 +279,7 @@ func testInstallAndUnenrollWithEndpointSecurity(t *testing.T, info *define.Info,
 	hostname, err := os.Hostname()
 	require.NoError(t, err)
 
-	agentID, err := fleettools.GetAgentIDByHostname(info.KibanaClient, policy.ID, hostname)
+	agentID, err := fleettools.GetAgentIDByHostname(ctx, info.KibanaClient, policy.ID, hostname)
 	require.NoError(t, err)
 
 	_, err = info.KibanaClient.UnEnrollAgent(ctx, kibana.UnEnrollAgentRequest{ID: agentID})
@@ -351,6 +357,7 @@ func testInstallWithEndpointSecurityAndRemoveEndpointIntegration(t *testing.T, i
 	installOpts := atesting.InstallOpts{
 		NonInteractive: true,
 		Force:          true,
+		Unprivileged:   atesting.NewBool(false),
 	}
 
 	ctx, cn := testcontext.WithDeadline(t, context.Background(), time.Now().Add(10*time.Minute))
@@ -518,6 +525,7 @@ func TestEndpointSecurityNonDefaultBasePath(t *testing.T) {
 	installOpts := atesting.InstallOpts{
 		NonInteractive: true,
 		Force:          true,
+		Unprivileged:   atesting.NewBool(false),
 		BasePath:       filepath.Join(paths.DefaultBasePath, "not_default"),
 	}
 	policyResp, err := tools.InstallAgentWithPolicy(ctx, t, installOpts, fixture, info.KibanaClient, createPolicyReq)
@@ -556,6 +564,86 @@ func TestEndpointSecurityNonDefaultBasePath(t *testing.T) {
 		}
 		return false
 	}, 2*time.Minute, 10*time.Second, "Agent never became DEGRADED with default install message")
+}
+
+// Tests that install of Elastic Defend fails if Agent is installed unprivileged.
+func TestEndpointSecurityUnprivileged(t *testing.T) {
+	info := define.Require(t, define.Requirements{
+		Group: Fleet,
+		Stack: &define.Stack{},
+		Local: false, // requires Agent installation
+		Sudo:  true,  // requires Agent installation
+
+		// Only supports Linux at the moment.
+		OS: []define.OS{
+			{
+				Type: define.Linux,
+			},
+		},
+	})
+
+	ctx, cn := testcontext.WithDeadline(t, context.Background(), time.Now().Add(10*time.Minute))
+	defer cn()
+
+	// Get path to agent executable.
+	fixture, err := define.NewFixture(t, define.Version())
+	require.NoError(t, err)
+
+	t.Log("Enrolling the agent in Fleet")
+	policyUUID := uuid.New().String()
+	createPolicyReq := kibana.AgentPolicy{
+		Name:        "test-policy-" + policyUUID,
+		Namespace:   "default",
+		Description: "Test policy " + policyUUID,
+		MonitoringEnabled: []kibana.MonitoringEnabledOption{
+			kibana.MonitoringEnabledLogs,
+			kibana.MonitoringEnabledMetrics,
+		},
+	}
+	installOpts := atesting.InstallOpts{
+		NonInteractive: true,
+		Force:          true,
+		Unprivileged:   atesting.NewBool(true), // ensure always unprivileged
+	}
+	policyResp, err := tools.InstallAgentWithPolicy(ctx, t, installOpts, fixture, info.KibanaClient, createPolicyReq)
+	require.NoErrorf(t, err, "Policy Response was: %v", policyResp)
+
+	t.Log("Installing Elastic Defend")
+	pkgPolicyResp, err := installElasticDefendPackage(t, info, policyResp.ID)
+	require.NoErrorf(t, err, "Policy Response was: %v", pkgPolicyResp)
+
+	ctx, cancel := testcontext.WithDeadline(t, context.Background(), time.Now().Add(10*time.Minute))
+	defer cancel()
+
+	c := fixture.Client()
+
+	errMsg := "Elastic Defend requires Elastic Agent be running as root"
+	if runtime.GOOS == define.Windows {
+		errMsg = "Elastic Defend requires Elastic Agent be running as Administrator or SYSTEM"
+	}
+	require.Eventually(t, func() bool {
+		err := c.Connect(ctx)
+		if err != nil {
+			t.Logf("connecting client to agent: %v", err)
+			return false
+		}
+		defer c.Disconnect()
+		state, err := c.State(ctx)
+		if err != nil {
+			t.Logf("error getting the agent state: %v", err)
+			return false
+		}
+		t.Logf("agent state: %+v", state)
+		if state.State != cproto.State_DEGRADED {
+			return false
+		}
+		for _, c := range state.Components {
+			if strings.Contains(c.Message, errMsg) {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Minute, 10*time.Second, "Agent never became DEGRADED with root/Administrator install message")
 }
 
 func agentAndEndpointAreHealthy(t *testing.T, ctx context.Context, agentClient client.Client) bool {

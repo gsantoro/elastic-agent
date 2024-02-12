@@ -22,10 +22,10 @@ import (
 // given agent's policy revision has reached the given policy revision; false
 // otherwise. The returned function is intended
 // for use with assert.Eventually or require.Eventually.
-func IsPolicyRevision(t *testing.T, client *kibana.Client, agentID string, policyRevision int) func() bool {
+func IsPolicyRevision(ctx context.Context, t *testing.T, client *kibana.Client, agentID string, policyRevision int) func() bool {
 	return func() bool {
 		getAgentReq := kibana.GetAgentRequest{ID: agentID}
-		updatedPolicyAgent, err := client.GetAgent(context.Background(), getAgentReq)
+		updatedPolicyAgent, err := client.GetAgent(ctx, getAgentReq)
 		if err != nil {
 			t.Logf("failed to get agent document to check policy revision: %v", err)
 			return false
@@ -99,7 +99,7 @@ func InstallAgentForPolicy(ctx context.Context, t *testing.T,
 	}
 
 	// Get default Fleet Server URL
-	fleetServerURL, err := fleettools.DefaultURL(kibClient)
+	fleetServerURL, err := fleettools.DefaultURL(ctx, kibClient)
 	if err != nil {
 		return fmt.Errorf("unable to get default Fleet Server URL: %w", err)
 	}
@@ -123,23 +123,19 @@ func InstallAgentForPolicy(ctx context.Context, t *testing.T,
 		timeout = time.Until(deadline)
 	}
 
+	// Don't check fleet status if --delay-enroll
+	if installOpts.DelayEnroll {
+		return nil
+	}
+
 	// Wait for Agent to be healthy
 	require.Eventually(
 		t,
-		check.FleetAgentStatus(t, kibClient, policyID, "online"),
+		check.FleetAgentStatus(ctx, t, kibClient, policyID, "online"),
 		timeout,
 		10*time.Second,
 		"Elastic Agent status is not online",
 	)
 
 	return nil
-}
-
-// InstallStandaloneAgent force install the Elastic Agent through agentFixture.
-func InstallStandaloneAgent(agentFixture *atesting.Fixture) ([]byte, error) {
-	installOpts := atesting.InstallOpts{
-		NonInteractive: true,
-		Force:          true,
-	}
-	return agentFixture.Install(context.Background(), &installOpts)
 }

@@ -7,11 +7,11 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +39,7 @@ import (
 	"github.com/elastic/elastic-agent/internal/pkg/agent/application/upgrade"
 	"github.com/elastic/elastic-agent/internal/pkg/agent/configuration"
 	"github.com/elastic/elastic-agent/internal/pkg/agent/errors"
+	"github.com/elastic/elastic-agent/internal/pkg/agent/install"
 	"github.com/elastic/elastic-agent/internal/pkg/agent/migration"
 	"github.com/elastic/elastic-agent/internal/pkg/agent/storage"
 	"github.com/elastic/elastic-agent/internal/pkg/cli"
@@ -59,6 +60,7 @@ const (
 )
 
 type cfgOverrider func(cfg *configuration.Configuration)
+type awaiters []<-chan struct{}
 
 func newRunCommandWithArgs(_ []string, streams *cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
@@ -133,7 +135,11 @@ func run(override cfgOverrider, testingMode bool, fleetInitTimeout time.Duration
 	defer cancel()
 	go service.ProcessWindowsControlEvents(stopBeat)
 
-	cfg, err := loadConfig(ctx, override)
+	return runElasticAgent(ctx, cancel, override, stop, testingMode, fleetInitTimeout, false, nil, modifiers...)
+}
+
+func runElasticAgent(ctx context.Context, cancel context.CancelFunc, override cfgOverrider, stop chan bool, testingMode bool, fleetInitTimeout time.Duration, runAsOtel bool, awaiters awaiters, modifiers ...component.PlatformModifier) error {
+	cfg, err := loadConfig(ctx, override, runAsOtel)
 	if err != nil {
 		return err
 	}
@@ -164,8 +170,14 @@ func run(override cfgOverrider, testingMode bool, fleetInitTimeout time.Duration
 	}
 	pathConfigFile := paths.AgentConfigFile()
 
+	// try early to check if running as root
+	isRoot, err := utils.HasRoot()
+	if err != nil {
+		return fmt.Errorf("failed to check for root permissions: %w", err)
+	}
+
 	// agent ID needs to stay empty in bootstrap mode
-	createAgentID := true
+	createAgentID := !runAsOtel
 	if cfg.Fleet != nil && cfg.Fleet.Server != nil && cfg.Fleet.Server.Bootstrap {
 		createAgentID = false
 	}
@@ -240,7 +252,7 @@ func run(override cfgOverrider, testingMode bool, fleetInitTimeout time.Duration
 		l.Info("APM instrumentation disabled")
 	}
 
-	coord, configMgr, composable, err := application.New(ctx, l, baseLogger, logLvl, agentInfo, rex, tracer, testingMode, fleetInitTimeout, configuration.IsFleetServerBootstrap(cfg.Fleet), modifiers...)
+	coord, configMgr, composable, err := application.New(ctx, l, baseLogger, logLvl, agentInfo, rex, tracer, testingMode, fleetInitTimeout, configuration.IsFleetServerBootstrap(cfg.Fleet), runAsOtel, modifiers...)
 	if err != nil {
 		return err
 	}
@@ -259,7 +271,8 @@ func run(override cfgOverrider, testingMode bool, fleetInitTimeout time.Duration
 
 	diagHooks := diagnostics.GlobalHooks()
 	diagHooks = append(diagHooks, coord.DiagnosticHooks()...)
-	control := server.New(l.Named("control"), agentInfo, coord, tracer, diagHooks, cfg.Settings.GRPC)
+	controlLog := l.Named("control")
+	control := server.New(controlLog, agentInfo, coord, tracer, diagHooks, cfg.Settings.GRPC)
 
 	// if the configMgr implements the TestModeConfigSetter in means that Elastic Agent is in testing mode and
 	// the configuration will come in over the control protocol, so we set the config setting on the control protocol
@@ -274,6 +287,31 @@ func run(override cfgOverrider, testingMode bool, fleetInitTimeout time.Duration
 		return err
 	}
 	defer control.Stop()
+
+	// create symlink from /run/elastic-agent.sock to `paths.ControlSocket()` when running as root
+	// this provides backwards compatibility as the control socket was moved with the addition of --unprivileged
+	// option during installation
+	//
+	// Windows `paths.ControlSocketRunSymlink` is `""` so this is always skipped on Windows.
+	if isRoot && paths.RunningInstalled() && paths.ControlSocketRunSymlink != "" {
+		socketPath := strings.TrimPrefix(paths.ControlSocket(), "unix://")
+		socketLog := controlLog.With("path", socketPath).With("link", paths.ControlSocketRunSymlink)
+		// ensure it doesn't exist before creating the symlink
+		if err := os.Remove(paths.ControlSocketRunSymlink); err != nil && !errors.Is(err, os.ErrNotExist) {
+			socketLog.Errorf("Failed to remove existing control socket symlink %s: %s", paths.ControlSocketRunSymlink, err)
+		}
+		if err := os.Symlink(socketPath, paths.ControlSocketRunSymlink); err != nil {
+			socketLog.Errorf("Failed to create control socket symlink %s -> %s: %s", paths.ControlSocketRunSymlink, socketPath, err)
+		} else {
+			socketLog.Infof("Created control socket symlink %s -> %s; allowing unix://%s connection", paths.ControlSocketRunSymlink, socketPath, paths.ControlSocketRunSymlink)
+		}
+		defer func() {
+			// delete the symlink on exit; ignore the error
+			if err := os.Remove(paths.ControlSocketRunSymlink); err != nil {
+				socketLog.Errorf("Failed to remove control socket symlink %s: %s", paths.ControlSocketRunSymlink, err)
+			}
+		}()
+	}
 
 	appDone := make(chan bool)
 	appErr := make(chan error)
@@ -321,6 +359,9 @@ LOOP:
 	}
 	cancel()
 	err = <-appErr
+	for _, a := range awaiters {
+		<-a // wait for awaiter to be done
+	}
 
 	if logShutdown {
 		l.Info("Shutting down completed.")
@@ -331,7 +372,16 @@ LOOP:
 	return err
 }
 
-func loadConfig(ctx context.Context, override cfgOverrider) (*configuration.Configuration, error) {
+func loadConfig(ctx context.Context, override cfgOverrider, runAsOtel bool) (*configuration.Configuration, error) {
+	if runAsOtel {
+		defaultCfg := configuration.DefaultConfiguration()
+		// disable monitoring to avoid injection of monitoring components
+		// in case inputs are not empty
+		defaultCfg.Settings.MonitoringConfig.Enabled = false
+		defaultCfg.Settings.V1MonitoringEnabled = false
+		return defaultCfg, nil
+	}
+
 	pathConfigFile := paths.ConfigFile()
 	rawConfig, err := config.LoadFile(pathConfigFile)
 	if err != nil {
@@ -437,7 +487,7 @@ func tryDelayEnroll(ctx context.Context, logger *logger.Logger, cfg *configurati
 		// no enrollment file exists or failed to stat it; nothing to do
 		return cfg, nil
 	}
-	contents, err := ioutil.ReadFile(enrollPath)
+	contents, err := os.ReadFile(enrollPath)
 	if err != nil {
 		return nil, errors.New(
 			err,
@@ -456,6 +506,10 @@ func tryDelayEnroll(ctx context.Context, logger *logger.Logger, cfg *configurati
 	}
 	options.DelayEnroll = false
 	options.FleetServer.SpawnAgent = false
+	// enrollCmd daemonReloadWithBackoff is broken
+	// see https://github.com/elastic/elastic-agent/issues/4043
+	// SkipDaemonRestart to true avoids running that code.
+	options.SkipDaemonRestart = true
 	c, err := newEnrollCmd(
 		ctx,
 		logger,
@@ -478,7 +532,7 @@ func tryDelayEnroll(ctx context.Context, logger *logger.Logger, cfg *configurati
 			errors.M("path", enrollPath)))
 	}
 	logger.Info("Successfully performed delayed enrollment of this Elastic Agent.")
-	return loadConfig(ctx, override)
+	return loadConfig(ctx, override, false)
 }
 
 func initTracer(agentName, version string, mcfg *monitoringCfg.MonitoringConfig) (*apm.Tracer, error) {
@@ -606,16 +660,25 @@ func ensureInstallMarkerPresent() error {
 
 	// Only an installed Elastic Agent can be self-upgraded. So, if the
 	// installation marker file is already present, we're all set.
-	if info.RunningInstalled() {
+	if paths.RunningInstalled() {
 		return nil
 	}
 
 	// Otherwise, we're being upgraded from a version of an installed Agent
 	// that didn't use an installation marker file (that is, before v8.8.0).
 	// So create the file now.
-	if err := info.CreateInstallMarker(paths.Top(), utils.CurrentFileOwner()); err != nil {
+	if err := install.CreateInstallMarker(paths.Top(), utils.CurrentFileOwner()); err != nil {
 		return fmt.Errorf("unable to create installation marker file during upgrade: %w", err)
 	}
+
+	// In v8.14.0, the control socket was moved to be in the installation path instead at
+	// a system level location, except on Windows where it remained at `npipe:///elastic-agent-system`.
+	// For Windows to be able to determine if it is running installed is from the creation of
+	// `.installed` marker that was not created until v8.8.0. Upgrading from any pre-8.8 version results
+	// in the `paths.ControlSocket()` in returning the incorrect control socket (only on Windows).
+	// Now that the install marker has been created we need to ensure that `paths.ControlSocket()` will
+	// return the correct result.
+	paths.ResolveControlSocket()
 
 	return nil
 }

@@ -7,6 +7,7 @@ outputs:
     hosts: '${ELASTICSEARCH_HOSTS:http://elasticsearch:9200}'
     username: '${ELASTICSEARCH_USERNAME:elastic}'
     password: '${ELASTICSEARCH_PASSWORD:changeme}'
+    preset: balanced
 
 inputs:
   - type: system/metrics
@@ -216,6 +217,11 @@ agent.logging.to_stderr: true
 # Providers supply the key/values pairs that are used for variable substitution
 # and conditionals. Each provider's keys are automatically prefixed with the name
 # of the provider.
+
+# All registered providers are enabled by default.
+
+# Disable all providers by default and only enable explicitly configured providers.
+# agent.providers.initial_default: false
 
 #providers:
 

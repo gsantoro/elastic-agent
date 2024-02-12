@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"sort"
 	"time"
@@ -38,7 +37,7 @@ const (
 // PolicyChangeHandler is a handler for POLICY_CHANGE action.
 type PolicyChangeHandler struct {
 	log       *logger.Logger
-	agentInfo *info.AgentInfo
+	agentInfo info.Agent
 	config    *configuration.Configuration
 	store     storage.Store
 	ch        chan coordinator.ConfigChange
@@ -53,7 +52,7 @@ type PolicyChangeHandler struct {
 // NewPolicyChangeHandler creates a new PolicyChange handler.
 func NewPolicyChangeHandler(
 	log *logger.Logger,
-	agentInfo *info.AgentInfo,
+	agentInfo info.Agent,
 	config *configuration.Configuration,
 	store storage.Store,
 	ch chan coordinator.ConfigChange,
@@ -198,7 +197,7 @@ func (h *PolicyChangeHandler) handleFleetServerHosts(ctx context.Context, c *con
 	}
 
 	// discard body for proper cancellation and connection reuse
-	_, _ = io.Copy(ioutil.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	reader, err := fleetToReader(h.agentInfo, h.config)
@@ -265,7 +264,7 @@ func clientEqual(k1 remote.Config, k2 remote.Config) bool {
 	return true
 }
 
-func fleetToReader(agentInfo *info.AgentInfo, cfg *configuration.Configuration) (io.Reader, error) {
+func fleetToReader(agentInfo info.Agent, cfg *configuration.Configuration) (io.Reader, error) {
 	configToStore := map[string]interface{}{
 		"fleet": cfg.Fleet,
 		"agent": map[string]interface{}{

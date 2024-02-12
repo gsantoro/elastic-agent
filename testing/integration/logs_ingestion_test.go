@@ -88,14 +88,14 @@ func TestLogIngestionFleetManaged(t *testing.T) {
 		createPolicyReq)
 	require.NoError(t, err)
 	t.Logf("created policy: %s", policy.ID)
-	check.ConnectedToFleet(t, agentFixture, 5*time.Minute)
+	check.ConnectedToFleet(ctx, t, agentFixture, 5*time.Minute)
 
 	t.Run("Monitoring logs are shipped", func(t *testing.T) {
 		testMonitoringLogsAreShipped(t, ctx, info, agentFixture, policy)
 	})
 
 	t.Run("Normal logs with flattened data_stream are shipped", func(t *testing.T) {
-		testFlattenedDatastreamFleetPolicy(t, ctx, info, agentFixture, policy)
+		testFlattenedDatastreamFleetPolicy(t, ctx, info, policy)
 	})
 }
 
@@ -109,7 +109,7 @@ func testMonitoringLogsAreShipped(
 	// Stage 1: Make sure metricbeat logs are populated
 	t.Log("Making sure metricbeat logs are populated")
 	docs := findESDocs(t, func() (estools.Documents, error) {
-		return estools.GetLogsForDataset(info.ESClient, "elastic_agent.metricbeat")
+		return estools.GetLogsForDataset(ctx, info.ESClient, "elastic_agent.metricbeat")
 	})
 	t.Logf("metricbeat: Got %d documents", len(docs.Hits.Hits))
 	require.NotZero(t, len(docs.Hits.Hits),
@@ -129,7 +129,7 @@ func testMonitoringLogsAreShipped(
 	// Stage 3: Make sure there are no errors in logs
 	t.Log("Making sure there are no error logs")
 	docs = queryESDocs(t, func() (estools.Documents, error) {
-		return estools.CheckForErrorsInLogs(info.ESClient, info.Namespace, []string{
+		return estools.CheckForErrorsInLogs(ctx, info.ESClient, info.Namespace, []string{
 			// acceptable error messages (include reason)
 			"Error dialing dial tcp 127.0.0.1:9200: connect: connection refused", // beat is running default config before its config gets updated
 			"Global configuration artifact is not available",                     // Endpoint: failed to load user artifact due to connectivity issues
@@ -151,22 +151,22 @@ func testMonitoringLogsAreShipped(
 	}
 	require.Empty(t, docs.Hits.Hits)
 
-	// Stage 4: Make sure we have message confirming central management is running
+	// Stage 3: Make sure we have message confirming central management is running
 	t.Log("Making sure we have message confirming central management is running")
 	docs = findESDocs(t, func() (estools.Documents, error) {
-		return estools.FindMatchingLogLines(info.ESClient, info.Namespace,
+		return estools.FindMatchingLogLines(ctx, info.ESClient, info.Namespace,
 			"Parsed configuration and determined agent is managed by Fleet")
 	})
 	require.NotZero(t, len(docs.Hits.Hits))
 
-	// Stage 5: verify logs from the monitoring components are not sent to the output
+	// Stage 4: verify logs from the monitoring components are not sent to the output
 	t.Log("Check monitoring logs")
 	hostname, err := os.Hostname()
 	if err != nil {
 		t.Fatalf("could not get hostname to filter Agent: %s", err)
 	}
 
-	agentID, err := fleettools.GetAgentIDByHostname(info.KibanaClient, policy.ID, hostname)
+	agentID, err := fleettools.GetAgentIDByHostname(ctx, info.KibanaClient, policy.ID, hostname)
 	require.NoError(t, err, "could not get Agent ID by hostname")
 	t.Logf("Agent ID: %q", agentID)
 
@@ -175,7 +175,7 @@ func testMonitoringLogsAreShipped(
 	// https://github.com/elastic/integrations/issues/6545
 	// TODO: use runtime fields while the above issue is not resolved.
 	docs = findESDocs(t, func() (estools.Documents, error) {
-		return estools.GetLogsForAgentID(info.ESClient, agentID)
+		return estools.GetLogsForAgentID(ctx, info.ESClient, agentID)
 	})
 	require.NoError(t, err, "could not get logs from Agent ID: %q, err: %s",
 		agentID, err)
@@ -250,7 +250,6 @@ func testFlattenedDatastreamFleetPolicy(
 	t *testing.T,
 	ctx context.Context,
 	info *define.Info,
-	agentFixture *atesting.Fixture,
 	policy kibana.PolicyResponse,
 ) {
 	dsType := "logs"
@@ -258,14 +257,18 @@ func testFlattenedDatastreamFleetPolicy(
 	dsDataset := cleanString(fmt.Sprintf("%s-dataset", t.Name()))
 	numEvents := 60
 
-	tempDir := t.TempDir()
+	// tempDir is not deleted to help with debugging issues
+	// useful to check permissions on contents
+	tempDir, err := os.MkdirTemp("", "fleet-ingest-*")
+	if err != nil {
+		t.Fatalf("failed to create temp directory: %s", err)
+	}
+	err = os.Chmod(tempDir, 0o755)
+	if err != nil {
+		t.Fatalf("failed to chmod temp directory %s: %s", tempDir, err)
+	}
 	logFilePath := filepath.Join(tempDir, "log.log")
 	generateLogFile(t, logFilePath, 2*time.Millisecond, numEvents)
-
-	agentFixture, err := define.NewFixture(t, define.Version())
-	if err != nil {
-		t.Fatalf("could not create new fixture: %s", err)
-	}
 
 	// 1. Prepare a request to add an integration to the policy
 	tmpl, err := template.New(t.Name() + "custom-log-policy").Parse(policyJSON)
@@ -364,7 +367,11 @@ func generateLogFile(t *testing.T, fullPath string, tick time.Duration, events i
 	t.Helper()
 	f, err := os.Create(fullPath)
 	if err != nil {
-		t.Fatalf("could not create file '%s: %s", fullPath, err)
+		t.Fatalf("could not create file '%s': %s", fullPath, err)
+	}
+	err = os.Chmod(fullPath, 0o644)
+	if err != nil {
+		t.Fatalf("failed to chmod file '%s': %s", fullPath, err)
 	}
 
 	go func() {

@@ -1,5 +1,6 @@
 # Elastic Agent
 
+[![Build status](https://badge.buildkite.com/1d35bb40427cc6833979645b61ea214fc4b686a2ffe3a68bdf.svg)](https://buildkite.com/elastic/elastic-agent)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=elastic_elastic-agent&metric=coverage)](https://sonarcloud.io/summary/new_code?id=elastic_elastic-agent)
 
 ## Architecture / internal docs
@@ -8,10 +9,20 @@
 - [Component spec files](docs/component-specs.md)
 - [Policy configuration](docs/agent-policy.md)
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Developer docs
 
 The source files for the general Elastic Agent documentation are currently stored
-in the [observability-docs](https://github.com/elastic/observability-docs) repo. The following docs are only focused on getting developers started building code for Elastic Agent.
+in the [ingest-docs](https://github.com/elastic/ingest-docs/tree/main/docs/en/ingest-management) repository.
+The following docs are only focused on getting developers started building code for Elastic Agent.
+
+### Test Framework
+
+In addition to standard Go tests, changes to the Elastic Agent are always installed and tested on cross-platform virtual machines.
+For details on writing and running tests see the [Test Framework Developer Guide](docs/test-framework-dev-guide.md).
 
 ### Changelog
 

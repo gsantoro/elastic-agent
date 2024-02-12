@@ -28,6 +28,7 @@ import (
 	"github.com/elastic/elastic-agent/internal/pkg/capabilities"
 	"github.com/elastic/elastic-agent/internal/pkg/composable"
 	"github.com/elastic/elastic-agent/internal/pkg/config"
+	"github.com/elastic/elastic-agent/internal/pkg/otel"
 	"github.com/elastic/elastic-agent/internal/pkg/release"
 	"github.com/elastic/elastic-agent/pkg/component"
 	"github.com/elastic/elastic-agent/pkg/component/runtime"
@@ -40,17 +41,19 @@ func New(
 	log *logger.Logger,
 	baseLogger *logger.Logger,
 	logLevel logp.Level,
-	agentInfo *info.AgentInfo,
+	agentInfo info.Agent,
 	reexec coordinator.ReExecManager,
 	tracer *apm.Tracer,
 	testingMode bool,
 	fleetInitTimeout time.Duration,
 	disableMonitoring bool,
+	runAsOtel bool,
 	modifiers ...component.PlatformModifier,
 ) (*coordinator.Coordinator, coordinator.ConfigManager, composable.Controller, error) {
 
-	err := version.InitVersionInformation()
-	if err != nil {
+	err := version.InitVersionError()
+	if err != nil && !runAsOtel {
+		// ignore this error when running in otel mode
 		// non-fatal error, log a warning and move on
 		log.With("error.message", err).Warnf("Error initializing version information: falling back to %s", release.Version())
 	}
@@ -132,6 +135,9 @@ func New(
 
 		// testing mode uses a config manager that takes configuration from over the control protocol
 		configMgr = newTestingModeConfigManager(log)
+	} else if runAsOtel {
+		// ignoring configuration in elastic-agent.yml
+		configMgr = otel.NewOtelModeConfigManager()
 	} else if configuration.IsStandalone(cfg.Fleet) {
 		log.Info("Parsed configuration and determined agent is managed locally")
 

@@ -97,7 +97,7 @@ type Manager struct {
 	ca         *authority.CertificateAuthority
 	listenAddr string
 	listenPort int
-	agentInfo  *info.AgentInfo
+	agentInfo  info.Agent
 	tracer     *apm.Tracer
 	monitor    MonitoringManager
 	grpcConfig *configuration.GRPCConfig
@@ -150,7 +150,7 @@ func NewManager(
 	logger,
 	baseLogger *logger.Logger,
 	listenAddr string,
-	agentInfo *info.AgentInfo,
+	agentInfo info.Agent,
 	tracer *apm.Tracer,
 	monitor MonitoringManager,
 	grpcConfig *configuration.GRPCConfig,
@@ -158,6 +158,10 @@ func NewManager(
 	ca, err := authority.NewCA()
 	if err != nil {
 		return nil, err
+	}
+
+	if agentInfo == nil {
+		return nil, errors.New("agentInfo cannot be nil")
 	}
 	m := &Manager{
 		logger:         logger,
@@ -656,6 +660,25 @@ func (m *Manager) CheckinV2(server proto.ElasticAgent_CheckinV2Server) error {
 	if runtime == nil {
 		// no component runtime with token; close connection
 		return status.Error(codes.PermissionDenied, "invalid token")
+	}
+
+	// enable chunking with the communicator if the initial checkin
+	// states that it supports chunking
+	runtime.comm.chunkingAllowed = false
+	for _, support := range initCheckin.Supports {
+		if support == proto.ConnectionSupports_CheckinChunking {
+			runtime.comm.chunkingAllowed = true
+			break
+		}
+	}
+	if runtime.comm.chunkingAllowed {
+		if m.grpcConfig.CheckinChunkingDisabled {
+			// chunking explicitly disabled
+			runtime.comm.chunkingAllowed = false
+			runtime.logger.Warn("control checkin v2 protocol supports chunking, but chunking was explicitly disabled")
+		} else {
+			runtime.logger.Info("control checkin v2 protocol has chunking enabled")
+		}
 	}
 
 	return runtime.comm.checkin(server, initCheckin)

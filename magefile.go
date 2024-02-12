@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/jedib0t/go-pretty/v6/table"
 
 	"github.com/elastic/e2e-testing/pkg/downloads"
 	"github.com/elastic/elastic-agent/dev-tools/mage"
@@ -119,6 +123,9 @@ type Cloud mg.Namespace
 
 // Integration namespace contains tasks related to operating and running integration tests.
 type Integration mg.Namespace
+
+// Otel namespace contains Open Telemetry related tasks.
+type Otel mg.Namespace
 
 func CheckNoChanges() error {
 	fmt.Println(">> fmt - go run")
@@ -462,7 +469,8 @@ func FixDRADockerArtifacts() error {
 		log.Printf("--- Found artifacts to rename %s %d", distributionsPath, len(matches))
 	}
 	// Match the artifact name and break down into groups so that we can reconstruct the names as its expected by the DRA DSL
-	artifactRegexp, err := regexp.Compile(`([\w+-]+)-(([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?)-([\w]+)-([\w]+)-([\w]+)\.([\w]+)\.([\w.]+)`)
+	// As SNAPSHOT keyword or BUILDID are optional, capturing the separator - or + with the value.
+	artifactRegexp, err := regexp.Compile(`([\w+-]+)-(([0-9]+)\.([0-9]+)\.([0-9]+))([-|\+][\w]+)?-([\w]+)-([\w]+)\.([\w]+)\.([\w.]+)`)
 	if err != nil {
 		return err
 	}
@@ -476,7 +484,8 @@ func FixDRADockerArtifacts() error {
 		}
 		match := artifactRegexp.FindAllStringSubmatch(artifactFile.Name(), -1)
 		// The groups here is tightly coupled with the regexp above.
-		targetName := fmt.Sprintf("%s-%s-%s-%s-image-%s-%s.%s", match[0][1], match[0][2], match[0][7], match[0][10], match[0][8], match[0][9], match[0][11])
+		// match[0][6] already contains the separator so no need to add before the variable
+		targetName := fmt.Sprintf("%s-%s%s-%s-image-%s-%s.%s", match[0][1], match[0][2], match[0][6], match[0][9], match[0][7], match[0][8], match[0][10])
 		if mg.Verbose() {
 			fmt.Printf("%#v\n", match)
 			fmt.Printf("Artifact: %s \n", artifactFile.Name())
@@ -550,7 +559,7 @@ func commitID() string {
 
 // Update is an alias for executing control protocol, configs, and specs.
 func Update() {
-	mg.SerialDeps(Config, BuildPGP, BuildFleetCfg)
+	mg.SerialDeps(Config, BuildPGP, BuildFleetCfg, Otel.Readme)
 }
 
 // CrossBuild cross-builds the beat for all target platforms.
@@ -1562,6 +1571,353 @@ func (Integration) Single(ctx context.Context, testName string) error {
 	return integRunner(ctx, false, testName)
 }
 
+var stateDir = ".integration-cache"
+var stateFile = "state.yml"
+
+// readFrameworkState reads the state file from the integration test framework
+func readFrameworkState() (runner.State, error) {
+	stateFilePath := ".integration-cache/state.yml"
+	data, err := os.ReadFile(stateFilePath)
+	if err != nil {
+		return runner.State{}, fmt.Errorf("could not read state file %q: %w", stateFilePath, err)
+	}
+
+	state := runner.State{}
+	if err := yaml.Unmarshal(data, &state); err != nil {
+		return runner.State{}, fmt.Errorf("failed unmarshal state file %s: %w", stateFilePath, err)
+	}
+
+	return state, nil
+}
+
+func listInstances() (string, []runner.StateInstance, error) {
+	builder := strings.Builder{}
+	state, err := readFrameworkState()
+	if err != nil {
+		return "", []runner.StateInstance{}, fmt.Errorf("could not read state file: %w", err)
+	}
+
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return "", []runner.StateInstance{}, fmt.Errorf("cannot get absolute path from state directory '%s': %w", stateDir, err)
+	}
+
+	for i, vm := range state.Instances {
+		isGCP := vm.Provisioner != "multipass"
+
+		t := table.NewWriter()
+		t.AppendRows([]table.Row{
+			{"#", i},
+			{"Provisioner", vm.Provisioner},
+			{"Name", vm.Name},
+			{"ID", vm.ID},
+		})
+
+		if isGCP {
+			t.AppendRow(table.Row{"Instance ID", vm.Internal["instance_id"]})
+		}
+
+		t.AppendRows([]table.Row{
+			{"IP", vm.IP},
+			{"Private Key", filepath.Join(absStateDir, "id_rsa")},
+			{"Public Key", filepath.Join(absStateDir, "id_rsa.pub")},
+			{"SSH connection", fmt.Sprintf(`ssh -i %s %s@%s`, filepath.Join(absStateDir, "id_rsa"), vm.Username, vm.IP)},
+		})
+
+		if isGCP {
+			t.AppendRow(table.Row{"GCP Link", fmt.Sprintf("https://console.cloud.google.com/compute/instancesDetail/zones/us-central1-a/instances/%s", vm.Internal["instance_id"])})
+		}
+
+		builder.WriteString(t.Render())
+		builder.WriteString("\n")
+	}
+
+	return builder.String(), state.Instances, nil
+}
+
+func listStacks() (string, error) {
+	builder := strings.Builder{}
+
+	state, err := readFrameworkState()
+	if err != nil {
+		return "", fmt.Errorf("could not read state file: %w", err)
+	}
+
+	for i, stack := range state.Stacks {
+		t := table.NewWriter()
+		t.AppendRows([]table.Row{
+			table.Row{"#", i},
+			table.Row{"Type", stack.Provisioner},
+		})
+
+		switch {
+		case stack.Provisioner == "serverless":
+			t.AppendRow(table.Row{"Project ID", stack.Internal["deployment_id"]})
+		case stack.Provisioner == "stateful":
+			t.AppendRow(table.Row{"Deployment ID", stack.Internal["deployment_id"]})
+		}
+		t.AppendRows([]table.Row{
+			{"Elasticsearch URL", stack.Elasticsearch},
+			{"Kibana", stack.Kibana},
+			{"Username", stack.Username},
+			{"Password", stack.Password},
+		})
+		builder.WriteString(t.Render())
+		builder.WriteString("\n")
+	}
+
+	return builder.String(), nil
+}
+
+func askForVM() (runner.StateInstance, error) {
+	vms, instances, err := listInstances()
+	if err != nil {
+		fmt.Errorf("cannot list VMs: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, vms)
+
+	if len(instances) == 1 {
+		fmt.Fprintln(os.Stderr, "There is only one VM, auto-selecting it")
+		return instances[0], nil
+	}
+
+	id := 0
+	fmt.Fprint(os.Stderr, "Instance number: ")
+	if _, err := fmt.Scanf("%d", &id); err != nil {
+		return runner.StateInstance{}, fmt.Errorf("could not read instance number: %w:", err)
+	}
+
+	if id >= len(instances) {
+		return runner.StateInstance{}, fmt.Errorf("Invalid Stack number, it must be between 0 and %d", len(instances)-1)
+	}
+
+	return instances[id], nil
+}
+
+func askForStack() (runner.Stack, error) {
+	mg.Deps(Integration.Stacks)
+
+	state, err := readFrameworkState()
+	if err != nil {
+		return runner.Stack{}, fmt.Errorf("could not read state file: %w", err)
+	}
+
+	if len(state.Stacks) == 1 {
+		fmt.Println("There is only one Stack, auto-selecting it")
+		return state.Stacks[0], nil
+	}
+
+	id := 0
+	fmt.Print("Stack number: ")
+	if _, err := fmt.Scanf("%d", &id); err != nil {
+		return runner.Stack{}, fmt.Errorf("cannot read Stack number: %w", err)
+	}
+
+	if id >= len(state.Stacks) {
+		return runner.Stack{}, fmt.Errorf("Invalid Stack number, it must be between 0 and %d", len(state.Stacks)-1)
+	}
+
+	return state.Stacks[id], nil
+}
+
+func generateEnvFile(stack runner.Stack) error {
+	fileExists := true
+	stat, err := os.Stat("./env.sh")
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cannot stat 'env.sh': %w", err)
+		}
+		fileExists = false
+	}
+
+	if fileExists {
+		bkpName := fmt.Sprintf("./env.sh-%d", rand.Int())
+		if err := os.Rename(stat.Name(), bkpName); err != nil {
+			return fmt.Errorf("cannot create backup: %w", err)
+		}
+		fmt.Printf("%q already existed, it was moved to %q\n", stat.Name(), bkpName)
+	}
+
+	f, err := os.Create("./env.sh")
+	if err != nil {
+		return fmt.Errorf("Could not create './env.sh': %w", err)
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "export ELASTICSEARCH_HOST=\"%s\"\n", stack.Elasticsearch)
+	fmt.Fprintf(f, "export ELASTICSEARCH_USERNAME=\"%s\"\n", stack.Username)
+	fmt.Fprintf(f, "export ELASTICSEARCH_PASSWORD=\"%s\"\n", stack.Password)
+
+	fmt.Fprintf(f, "export KIBANA_HOST=\"%s\"\n", stack.Kibana)
+	fmt.Fprintf(f, "export KIBANA_USERNAME=\"%s\"\n", stack.Username)
+	fmt.Fprintf(f, "export KIBANA_PASSWORD=\"%s\"\n", stack.Password)
+
+	return nil
+}
+
+// PrintState prints details about cloud stacks and VMs
+func (Integration) PrintState(ctx context.Context) {
+	fmt.Println("Virtual Machines")
+	mg.Deps(Integration.ListInstances)
+	fmt.Print("\n\n")
+	fmt.Println("Cloud Stacks")
+	mg.Deps(Integration.Stacks)
+}
+
+// ListInstances lists all VMs in a human readable form, including connection details
+func (Integration) ListInstances() error {
+	t, _, err := listInstances()
+	if err != nil {
+		fmt.Errorf("cannot list VMs: %w", err)
+	}
+
+	fmt.Print(t)
+
+	return nil
+}
+
+// SSH prints to stdout the SSH command to connect to a VM, a menu is printed to stderr.
+func (Integration) SSH() error {
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return fmt.Errorf("cannot get absolute path from state directory '%s': %w", stateDir, err)
+	}
+
+	vm, err := askForVM()
+	if err != nil {
+		fmt.Errorf("cannot get VM: %w", err)
+	}
+
+	fmt.Println(fmt.Sprintf(`ssh -i %s %s@%s`, filepath.Join(absStateDir, "id_rsa"), vm.Username, vm.IP))
+	return nil
+}
+
+// Stacks lists all stack deployments in a human readable form
+func (Integration) Stacks() error {
+	stacks, err := listStacks()
+	if err != nil {
+		return fmt.Errorf("cannot list stacks: %w", err)
+	}
+
+	fmt.Print(stacks)
+	return nil
+}
+
+// GenerateEnvFile generates 'env.sh' containing envvars to connect to a cloud stack
+func (Integration) GenerateEnvFile() error {
+	stack, err := askForStack()
+	if err != nil {
+		return fmt.Errorf("cannot get stack: %w", err)
+	}
+
+	if err := generateEnvFile(stack); err != nil {
+		return fmt.Errorf("cannot generate env file: %w", err)
+	}
+	fmt.Println("run 'source ./env.sh' to load the environment variables to your shell")
+
+	return nil
+}
+
+// DeployEnvFile generates and deploys to a VM 'env.sh' containing envvars to connect to a cloud stack
+func (Integration) DeployEnvFile() error {
+	stack, err := askForStack()
+	if err != nil {
+		return fmt.Errorf("cannot get stack: %w", err)
+	}
+
+	if err := generateEnvFile(stack); err != nil {
+		return fmt.Errorf("cannot generate env file: %w", err)
+	}
+
+	fullEnvFilepath, err := filepath.Abs("./env.sh")
+	if err != nil {
+		return fmt.Errorf("cannot get full filepath for env file: %w", err)
+	}
+
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return fmt.Errorf("cannot get absolute path from state directory '%s': %w", stateDir, err)
+	}
+	keyFile := filepath.Join(absStateDir, "id_rsa")
+
+	vm, err := askForVM()
+	if err != nil {
+		return fmt.Errorf("cannot get VM: %w", err)
+	}
+
+	cmd := exec.Command("scp", "-i", keyFile, fullEnvFilepath, fmt.Sprintf("%s@%s:~/env.sh", vm.Username, vm.IP))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("could not copy env file to VM: %w", err)
+	}
+
+	return nil
+}
+
+// DeployDebugTools installs all necessary tools to debug tests from a VM
+func (Integration) DeployDebugTools() error {
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return fmt.Errorf("cannot get absolute path from state directory '%s': %w", stateDir, err)
+	}
+	keyFile := filepath.Join(absStateDir, "id_rsa")
+
+	vm, err := askForVM()
+	if err != nil {
+		return fmt.Errorf("cannot get VM: %w", err)
+	}
+
+	isWindowsVM := strings.Contains(vm.ID, "windows")
+
+	commands := []string{
+		fmt.Sprintf("sudo chown -R %s:%s $HOME/go/pkg", vm.Username, vm.Username),
+		"go install github.com/go-delve/delve/cmd/dlv@latest",
+	}
+
+	if isWindowsVM {
+		commands = append(commands,
+			"choco install -y git",
+			"if exist mage rmdir /s /q mage",
+			"if exist elastic-agent rmdir /s /q elastic-agent",
+		)
+	} else {
+		commands = append(commands,
+			`echo 'export PATH=$PATH:'"$HOME/go/bin" |sudo tee /root/.bashrc`,
+			"rm -rf mage",
+			"rm -rf elastic-agent",
+			"sudo apt install -y docker.io",
+			"sudo systemctl enable --now docker",
+			"sudo usermod -aG docker $USER",
+		)
+	}
+
+	commands = append(commands,
+		"git clone https://github.com/magefile/mage",
+		"cd mage && go run bootstrap.go",
+		"git clone https://github.com/elastic/elastic-agent",
+	)
+
+	if isWindowsVM {
+		commands = append(commands, "cd elastic-agent && xcopy /s /e /y ..\\agent\\ .\\")
+	} else {
+		commands = append(commands, "cd elastic-agent && cp -r ~/agent/* ./")
+	}
+
+	for _, c := range commands {
+		cmd := exec.Command("ssh", "-i", keyFile, fmt.Sprintf("%s@%s", vm.Username, vm.IP), c)
+		cmd.Stdin = os.Stdin
+		cmd.Stderr = os.Stderr
+		cmd.Stdout = os.Stdout
+
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println("Delve, Mage have been installed and added to the path")
+	fmt.Println("~/elastic-agent")
+	return nil
+}
+
 // PrepareOnRemote shouldn't be called locally (called on remote host to prepare it for testing)
 func (Integration) PrepareOnRemote() {
 	mg.Deps(mage.InstallGoTestTools)
@@ -1887,7 +2243,9 @@ func createTestRunner(matrix bool, singleTest string, goTestFlags string, batche
 		}
 
 	} else if stackProvisionerMode == ess.ProvisionerServerless {
-		stackProvisioner, err = ess.NewServerlessProvisioner(provisionCfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		stackProvisioner, err = ess.NewServerlessProvisioner(ctx, provisionCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -2240,4 +2598,119 @@ func hasCleanOnExit() bool {
 	clean := os.Getenv("TEST_INTEG_CLEAN_ON_EXIT")
 	b, _ := strconv.ParseBool(clean)
 	return b
+}
+
+type dependency struct {
+	Name    string
+	Version string
+}
+
+type dependencies struct {
+	Receivers  []dependency
+	Exporters  []dependency
+	Processors []dependency
+	Extensions []dependency
+}
+
+func (d dependency) Clean(sep string) dependency {
+	cleanFn := func(dep, sep string) string {
+		chunks := strings.SplitN(dep, sep, 2)
+		if len(chunks) == 2 {
+			return chunks[1]
+		}
+
+		return dep
+	}
+
+	return dependency{
+		Name:    cleanFn(d.Name, sep),
+		Version: d.Version,
+	}
+}
+
+func (Otel) Readme() error {
+	fmt.Println(">> Building internal/pkg/otel/README.md")
+
+	readmeTmpl := filepath.Join("internal", "pkg", "otel", "templates", "README.md.tmpl")
+	readmeOut := filepath.Join("internal", "pkg", "otel", "README.md")
+
+	// read README template
+	tmpl, err := template.ParseFiles(readmeTmpl)
+	if err != nil {
+		return fmt.Errorf("failed to parse README template: %w", err)
+	}
+
+	data, err := getOtelDependencies()
+	if err != nil {
+		return fmt.Errorf("Failed to get OTel dependencies: %w", err)
+	}
+
+	// resolve template
+	out, err := os.OpenFile(readmeOut, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %w", readmeOut, err)
+	}
+	defer out.Close()
+
+	return tmpl.Execute(out, data)
+}
+
+func getOtelDependencies() (*dependencies, error) {
+	// read go.mod
+	readFile, err := os.Open("go.mod")
+	if err != nil {
+		return nil, err
+	}
+	defer readFile.Close()
+
+	scanner := bufio.NewScanner(readFile)
+
+	scanner.Split(bufio.ScanLines)
+	var receivers, extensions, exporters, processors []dependency
+	// process imports
+	for scanner.Scan() {
+		l := strings.TrimSpace(scanner.Text())
+		// is otel
+		if !strings.Contains(l, "go.opentelemetry.io/") &&
+			!strings.Contains(l, "github.com/open-telemetry/") {
+			continue
+		}
+
+		if strings.Contains(l, "// indirect") {
+			continue
+		}
+
+		parseLine := func(line string) (dependency, error) {
+			chunks := strings.SplitN(line, " ", 2)
+			if len(chunks) != 2 {
+				return dependency{}, fmt.Errorf("incorrect format for line %q", line)
+			}
+			return dependency{
+				Name:    chunks[0],
+				Version: chunks[1],
+			}, nil
+		}
+
+		d, err := parseLine(l)
+		if err != nil {
+			return nil, err
+		}
+
+		if strings.Contains(l, "/receiver/") {
+			receivers = append(receivers, d.Clean("/receiver/"))
+		} else if strings.Contains(l, "/processor/") {
+			processors = append(processors, d.Clean("/processor/"))
+		} else if strings.Contains(l, "/exporter/") {
+			exporters = append(exporters, d.Clean("/exporter/"))
+		} else if strings.Contains(l, "/extension/") {
+			extensions = append(extensions, d.Clean("/extension/"))
+		}
+	}
+
+	return &dependencies{
+		Receivers:  receivers,
+		Exporters:  exporters,
+		Processors: processors,
+		Extensions: extensions,
+	}, nil
 }

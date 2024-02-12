@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/elastic/elastic-agent/internal/pkg/agent/application/upgrade/artifact"
 	"github.com/elastic/elastic-agent/internal/pkg/agent/errors"
+	agtversion "github.com/elastic/elastic-agent/pkg/version"
 )
 
 const (
@@ -83,7 +83,7 @@ type Verifier interface {
 	// If the checksum does no match Verify returns a *download.ChecksumMismatchError.
 	// If the PGP signature check fails then Verify returns a
 	// *download.InvalidSignatureError.
-	Verify(a artifact.Artifact, version string, skipDefaultPgp bool, pgpBytes ...string) error
+	Verify(a artifact.Artifact, version agtversion.ParsedSemVer, skipDefaultPgp bool, pgpBytes ...string) error
 }
 
 // VerifySHA512HashWithCleanup calls VerifySHA512Hash and, in case of a
@@ -312,7 +312,7 @@ func fetchPgpFromURI(uri string, client HTTPClient) ([]byte, error) {
 		return nil, errors.New(fmt.Sprintf("call to '%s' returned unsuccessful status code: %d", uri, resp.StatusCode), errors.TypeNetwork, errors.M(errors.MetaKeyURI, uri))
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 type HTTPClient interface {

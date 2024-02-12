@@ -42,9 +42,11 @@ func NewCommandWithArgs(args []string, streams *cli.IOStreams) *cobra.Command {
 	}
 
 	// Init version information contained in package version file
-	err := version.InitVersionInformation()
-	if err != nil {
-		cmd.PrintErrf("Error initializing version information: %v\n", err)
+	if isOtel := len(args) > 1 && args[1] == "otel"; !isOtel {
+		err := version.InitVersionError()
+		if err != nil {
+			cmd.PrintErrf("Error initializing version information: %v\n", err)
+		}
 	}
 
 	// path flags
@@ -54,9 +56,11 @@ func NewCommandWithArgs(args []string, streams *cli.IOStreams) *cobra.Command {
 	cmd.PersistentFlags().MarkHidden("path.home.unversioned") //nolint:errcheck // it's hidden
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("path.config"))
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("c"))
+	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("config"))
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("path.logs"))
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("path.downloads"))
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("path.install"))
+	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("path.socket"))
 
 	// logging flags
 	cmd.PersistentFlags().AddGoFlag(flag.CommandLine.Lookup("v"))
@@ -79,6 +83,7 @@ func NewCommandWithArgs(args []string, streams *cli.IOStreams) *cobra.Command {
 	cmd.AddCommand(newDiagnosticsCommand(args, streams))
 	cmd.AddCommand(newComponentCommandWithArgs(args, streams))
 	cmd.AddCommand(newLogsCommandWithArgs(args, streams))
+	cmd.AddCommand(newOtelCommandWithArgs(args, streams))
 
 	// windows special hidden sub-command (only added on Windows)
 	reexec := newReExecWindowsCommand(args, streams)

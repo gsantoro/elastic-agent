@@ -45,7 +45,7 @@ type Server struct {
 	cproto.UnimplementedElasticAgentControlServer
 
 	logger     *logger.Logger
-	agentInfo  *info.AgentInfo
+	agentInfo  info.Agent
 	coord      *coordinator.Coordinator
 	listener   net.Listener
 	server     *grpc.Server
@@ -57,7 +57,7 @@ type Server struct {
 }
 
 // New creates a new control protocol server.
-func New(log *logger.Logger, agentInfo *info.AgentInfo, coord *coordinator.Coordinator, tracer *apm.Tracer, diagHooks diagnostics.Hooks, grpcConfig *configuration.GRPCConfig) *Server {
+func New(log *logger.Logger, agentInfo info.Agent, coord *coordinator.Coordinator, tracer *apm.Tracer, diagHooks diagnostics.Hooks, grpcConfig *configuration.GRPCConfig) *Server {
 	return &Server{
 		logger:     log,
 		agentInfo:  agentInfo,
@@ -85,6 +85,7 @@ func (s *Server) Start() error {
 		s.logger.Errorf("unable to create listener: %s", err)
 		return err
 	}
+	s.logger.With("address", control.Address()).Infof("GRPC control socket listening at %s", control.Address())
 	s.listener = lis
 	if s.tracer != nil {
 		apmInterceptor := apmgrpc.NewUnaryServerInterceptor(apmgrpc.WithRecovery(), apmgrpc.WithTracer(s.tracer))
@@ -328,7 +329,7 @@ func (s *Server) Configure(ctx context.Context, req *cproto.ConfigureRequest) (*
 	return &cproto.Empty{}, nil
 }
 
-func stateToProto(state *coordinator.State, agentInfo *info.AgentInfo) (*cproto.StateResponse, error) {
+func stateToProto(state *coordinator.State, agentInfo info.Agent) (*cproto.StateResponse, error) {
 	var err error
 	components := make([]*cproto.ComponentState, 0, len(state.Components))
 	for _, comp := range state.Components {
@@ -356,9 +357,8 @@ func stateToProto(state *coordinator.State, agentInfo *info.AgentInfo) (*cproto.
 			Message: comp.State.Message,
 			Units:   units,
 			VersionInfo: &cproto.ComponentVersionInfo{
-				Name:    comp.State.VersionInfo.Name,
-				Version: comp.State.VersionInfo.Version,
-				Meta:    comp.State.VersionInfo.Meta,
+				Name: comp.State.VersionInfo.Name,
+				Meta: comp.State.VersionInfo.Meta,
 			},
 		})
 	}
