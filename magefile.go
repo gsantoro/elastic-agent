@@ -939,20 +939,20 @@ func packageAgent(platforms []string, packagingFn func()) {
 			// https://artifacts-snapshot.elastic.co/fleet-server/latest/8.11.0-SNAPSHOT.json
 			// https://artifacts-snapshot.elastic.co/prodfiler/latest/8.11.0-SNAPSHOT.json
 			externalBinaries := map[string]string{
-				"auditbeat":             "beats",
+				// "auditbeat":             "beats",
 				"filebeat":              "beats",
-				"heartbeat":             "beats",
+				// "heartbeat":             "beats",
 				"metricbeat":            "beats",
-				"osquerybeat":           "beats",
-				"packetbeat":            "beats",
-				"cloudbeat":             "cloudbeat", // only supporting linux/amd64 or linux/arm64
-				"cloud-defend":          "cloud-defend",
-				"apm-server":            "apm-server", // not supported on darwin/aarch64
-				"endpoint-security":     "endpoint-dev",
-				"fleet-server":          "fleet-server",
-				"pf-elastic-collector":  "prodfiler",
-				"pf-elastic-symbolizer": "prodfiler",
-				"pf-host-agent":         "prodfiler",
+				// "osquerybeat":           "beats",
+				// "packetbeat":            "beats",
+				// "cloudbeat":             "cloudbeat", // only supporting linux/amd64 or linux/arm64
+				// "cloud-defend":          "cloud-defend",
+				// "apm-server":            "apm-server", // not supported on darwin/aarch64
+				// "endpoint-security":     "endpoint-dev",
+				// "fleet-server":          "fleet-server",
+				// "pf-elastic-collector":  "prodfiler",
+				// "pf-elastic-symbolizer": "prodfiler",
+				// "pf-host-agent":         "prodfiler",
 			}
 
 			// Only log fatal logs for logs produced using logrus. This is the global logger
